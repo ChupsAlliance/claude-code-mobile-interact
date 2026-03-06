@@ -33,7 +33,8 @@
       padding: 18px 18px 14px;
       user-select: none;
       -webkit-app-region: no-drag;
-      overflow: hidden;
+      overflow-y: auto;
+      overflow-x: hidden;
     }
 
     /* ── Header ────────────────────────────────────── */
@@ -237,11 +238,40 @@
         <div class="row-label">Windows toast notifications</div>
         <div class="row-desc">Show popup in Action Center</div>
       </div>
-      <label class="switch" title="Toggle toast notifications">
-        <input type="checkbox" id="toastInput" aria-label="Windows toast notifications">
-        <span class="track"></span>
-        <span class="thumb"></span>
-      </label>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button class="btn-icon" id="testToastBtn" title="Test toast notification" aria-label="Test toast notification">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+        </button>
+        <label class="switch" title="Toggle toast notifications">
+          <input type="checkbox" id="toastInput" aria-label="Windows toast notifications">
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Happy push notification -->
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="row-label">Happy push notification</div>
+        <div class="row-desc">Send to phone via Happy app</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button class="btn-icon" id="testHappyBtn" title="Test Happy notification" aria-label="Test Happy notification">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 2 11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+        <label class="switch" title="Toggle Happy notifications">
+          <input type="checkbox" id="happyInput" aria-label="Happy push notification">
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </div>
     </div>
   </div>
 
@@ -282,28 +312,6 @@
           <polygon points="5 3 19 12 5 21 5 3"/>
         </svg>
       </button>
-    </div>
-  </div>
-
-  <!-- Happy push notification -->
-  <div class="card">
-    <div class="row">
-      <div>
-        <div class="row-label">Happy push notification</div>
-        <div class="row-desc">Send to phone via Happy app</div>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <button class="btn-icon" id="testHappyBtn" title="Test Happy notification" aria-label="Test Happy notification">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 2 11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
-        </button>
-        <label class="switch" title="Toggle Happy notifications">
-          <input type="checkbox" id="happyInput" aria-label="Happy push notification">
-          <span class="track"></span>
-          <span class="thumb"></span>
-        </label>
-      </div>
     </div>
   </div>
 

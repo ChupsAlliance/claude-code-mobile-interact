@@ -14,6 +14,7 @@ const testSoundBtn    = document.getElementById('testSoundBtn');
 const testAskSoundBtn = document.getElementById('testAskSoundBtn');
 const testGchatBtn    = document.getElementById('testGchatBtn');
 const testHappyBtn    = document.getElementById('testHappyBtn');
+const testToastBtn    = document.getElementById('testToastBtn');
 const saveBtn         = document.getElementById('saveBtn');
 const statusBar       = document.getElementById('statusBar');
 const statusTxt       = document.getElementById('statusText');
@@ -110,6 +111,18 @@ testHappyBtn.addEventListener('click', async () => {
     showStatus('Push sent to phone', 'ok', checkIcon());
   } else {
     showStatus(res.error || 'Happy notify failed', 'err', xIcon());
+  }
+});
+
+testToastBtn.addEventListener('click', async () => {
+  testToastBtn.disabled = true;
+  showStatus('Showing toast notification...', 'info', spinnerIcon());
+  const res = await invoke('test_toast');
+  testToastBtn.disabled = false;
+  if (res.ok) {
+    showStatus('Toast shown', 'ok', checkIcon());
+  } else {
+    showStatus(res.error || 'Toast failed', 'err', xIcon());
   }
 });
 

@@ -36,6 +36,15 @@ fn write_settings(data: &Value) {
     let _ = fs::write(&path, json);
 }
 
+fn get_happy_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join("AppData")
+        .join("Roaming")
+        .join("npm")
+        .join("happy.cmd")
+}
+
 // ── Saved config (reliable round-trip, no command parsing) ────
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -50,6 +59,18 @@ struct SavedNotifyConfig {
     toast_enabled: bool,
     #[serde(default)]
     happy_enabled: bool,
+}
+
+impl From<&SaveConfigArgs> for SavedNotifyConfig {
+    fn from(a: &SaveConfigArgs) -> Self {
+        SavedNotifyConfig {
+            sound_path: a.sound_path.clone(),
+            ask_sound_path: a.ask_sound_path.clone(),
+            gchat_webhook: a.gchat_webhook.clone(),
+            toast_enabled: a.toast_enabled,
+            happy_enabled: a.happy_enabled,
+        }
+    }
 }
 
 fn load_saved_config(settings: &Value) -> Option<SavedNotifyConfig> {
@@ -93,10 +114,16 @@ fn extract_sound_from_hooks(settings: &Value, hook_key: &str) -> Option<String> 
     let src = settings.get("hooks").or_else(|| settings.get("_hooksBackup"))?;
     let arr = src.get(hook_key)?.as_array()?;
     for entry in arr {
-        for hook in entry.get("hooks")?.as_array()? {
-            let cmd = hook.get("command")?.as_str()?;
-            if cmd.contains("SoundPlayer") {
-                return extract_wav_path(cmd);
+        // Use and_then instead of ? so a missing "hooks" field skips the entry
+        if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+            for hook in hooks {
+                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                    if cmd.contains("SoundPlayer") {
+                        if let Some(path) = extract_wav_path(cmd) {
+                            return Some(path);
+                        }
+                    }
+                }
             }
         }
     }
@@ -107,13 +134,17 @@ fn extract_gchat_from_hooks(settings: &Value) -> Option<String> {
     let src = settings.get("hooks").or_else(|| settings.get("_hooksBackup"))?;
     let arr = src.get("Stop")?.as_array()?;
     for entry in arr {
-        for hook in entry.get("hooks")?.as_array()? {
-            let cmd = hook.get("command")?.as_str()?;
-            if cmd.contains("chat.googleapis.com") {
-                for part in cmd.split_whitespace() {
-                    let trimmed = part.trim_matches('"').trim_matches('\'');
-                    if trimmed.contains("chat.googleapis.com") && trimmed.starts_with("https://") {
-                        return Some(trimmed.to_string());
+        // Use and_then instead of ? so a missing "hooks" field skips the entry
+        if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+            for hook in hooks {
+                if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                    if cmd.contains("chat.googleapis.com") {
+                        for part in cmd.split_whitespace() {
+                            let trimmed = part.trim_matches('"').trim_matches('\'');
+                            if trimmed.contains("chat.googleapis.com") && trimmed.starts_with("https://") {
+                                return Some(trimmed.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -122,7 +153,8 @@ fn extract_gchat_from_hooks(settings: &Value) -> Option<String> {
     None
 }
 
-fn detect_toast_from_hooks(settings: &Value) -> bool {
+/// Generic: returns true if any hook command in the settings satisfies `predicate`.
+fn detect_cmd_in_hooks<F: Fn(&str) -> bool>(settings: &Value, predicate: F) -> bool {
     let src = match settings.get("hooks").or_else(|| settings.get("_hooksBackup")) {
         Some(v) => v,
         None => return false,
@@ -134,32 +166,7 @@ fn detect_toast_from_hooks(settings: &Value) -> bool {
                     if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
                         for hook in hooks {
                             if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                                if cmd.contains("ToastNotificationManager") {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-fn detect_happy_from_hooks(settings: &Value) -> bool {
-    let src = match settings.get("hooks").or_else(|| settings.get("_hooksBackup")) {
-        Some(v) => v,
-        None => return false,
-    };
-    if let Some(obj) = src.as_object() {
-        for (_key, arr) in obj {
-            if let Some(entries) = arr.as_array() {
-                for entry in entries {
-                    if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
-                        for hook in hooks {
-                            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                                if cmd.contains("happy") && cmd.contains("notify") {
+                                if predicate(cmd) {
                                     return true;
                                 }
                             }
@@ -178,6 +185,9 @@ fn is_claude_notify_hook(cmd: &str) -> bool {
     cmd.contains("SoundPlayer")
         || cmd.contains("chat.googleapis.com")
         || cmd.contains("ToastNotificationManager")
+        || cmd.contains("claude-notify-toast.ps1")
+        || cmd.contains("claude-notify-toast.cjs")
+        || cmd.contains("claude-notify-balloon.ps1")
         || (cmd.contains("happy") && cmd.contains("notify"))
 }
 
@@ -196,10 +206,8 @@ fn filter_out_cn_entries(arr: &[Value]) -> Vec<Value> {
                 })
                 .collect();
             if non_cn.is_empty() {
-                // All hooks in this entry were CN — drop the entire entry
                 continue;
             }
-            // Keep the entry but only with non-CN hooks
             let mut new_entry = entry.clone();
             if let Some(obj) = new_entry.as_object_mut() {
                 obj.insert(
@@ -209,7 +217,6 @@ fn filter_out_cn_entries(arr: &[Value]) -> Vec<Value> {
             }
             kept.push(new_entry);
         } else {
-            // No hooks array — keep as-is (shouldn't happen but be safe)
             kept.push(entry.clone());
         }
     }
@@ -315,9 +322,58 @@ fn sound_command(path: &str) -> Value {
 }
 
 fn toast_command(title: &str, message: &str) -> Value {
+    // Use a Node.js wrapper: reads stdin JSON for cwd, then shows balloon via PowerShell
+    let script_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".claude");
+    let _ = std::fs::create_dir_all(&script_dir);
+
+    // Simple PS1 that shows a balloon tip (works without WinRT suppression issues)
+    let ps_path = script_dir.join("claude-notify-balloon.ps1");
+    let ps_content = r#"param([string]$Title, [string]$Message)
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    $b = New-Object System.Windows.Forms.NotifyIcon
+    $b.Icon = [System.Drawing.SystemIcons]::Information
+    $b.BalloonTipTitle = $Title
+    $b.BalloonTipText = $Message
+    $b.Visible = $true
+    $b.ShowBalloonTip(6000)
+    Start-Sleep -Seconds 5
+    $b.Dispose()
+} catch {}
+exit 0
+"#;
+    let _ = std::fs::write(&ps_path, ps_content);
+
+    // Node wrapper reads stdin to extract project name, then spawns PS balloon
+    let wrapper_path = script_dir.join("claude-notify-toast.cjs");
+    let ps_path_fwd = ps_path.to_string_lossy().replace('\\', "/");
+    let wrapper_content = format!(
+        r#"'use strict';
+let d='';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data',c=>d+=c);
+process.stdin.on('end',()=>{{
+  let p='';
+  try{{ const j=JSON.parse(d); if(j.cwd) p=require('path').basename(j.cwd); }}catch{{}}
+  const msg = p ? `${{process.argv[3]}} - ${{p}}` : process.argv[3];
+  require('child_process').spawn('powershell.exe',
+    ['-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',
+     '{}','-Title',process.argv[2],'-Message',msg],
+    {{stdio:'ignore',detached:true}}).unref();
+}});
+setTimeout(()=>process.exit(0),3000);
+"#,
+        ps_path_fwd
+    );
+    let _ = std::fs::write(&wrapper_path, wrapper_content);
+
     let cmd = format!(
-        "powershell.exe -c \"try {{ [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null; $xml = [Windows.Data.Xml.Dom.XmlDocument]::new(); $xml.LoadXml('<toast><visual><binding template=''ToastGeneric''><text>{}</text><text>{}</text></binding></visual></toast>'); [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($xml)) }} catch {{}}; exit 0\"",
-        title, message
+        "node \"{}\" \"{}\" \"{}\"",
+        wrapper_path.to_string_lossy().replace('\\', "/"),
+        title,
+        message
     );
     serde_json::json!({ "type": "command", "command": cmd })
 }
@@ -342,15 +398,9 @@ fn gchat_command(webhook: &str, title: &str, subtitle: &str, icon_url: &str, ico
 }
 
 fn happy_command(title: &str, message: &str) -> Value {
-    let happy_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join("AppData")
-        .join("Roaming")
-        .join("npm")
-        .join("happy.cmd");
     let cmd = format!(
         "cmd /c \"\"{}\" notify -t \"{}\" -p \"{}\"\"",
-        happy_path.to_string_lossy(),
+        get_happy_path().to_string_lossy(),
         title,
         message
     );
@@ -444,8 +494,8 @@ fn get_config() -> Config {
             .unwrap_or_else(|| "C:\\Windows\\Media\\Ring01.wav".to_string()),
         gchat_webhook: extract_gchat_from_hooks(&s).unwrap_or_default(),
         auto_start: get_auto_start_enabled(),
-        toast_enabled: detect_toast_from_hooks(&s),
-        happy_enabled: detect_happy_from_hooks(&s),
+        toast_enabled: detect_cmd_in_hooks(&s, |cmd| cmd.contains("ToastNotificationManager")),
+        happy_enabled: detect_cmd_in_hooks(&s, |cmd| cmd.contains("happy") && cmd.contains("notify")),
     }
 }
 
@@ -456,35 +506,19 @@ fn save_config(args: SaveConfigArgs) -> Value {
     set_auto_start(args.auto_start);
 
     // Save our own config for reliable round-trip
-    write_saved_config(&mut s, &SavedNotifyConfig {
-        sound_path: args.sound_path.clone(),
-        ask_sound_path: args.ask_sound_path.clone(),
-        gchat_webhook: args.gchat_webhook.clone(),
-        toast_enabled: args.toast_enabled,
-        happy_enabled: args.happy_enabled,
-    });
-
-    let stop_entry = build_stop_entry(&args.sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
-    let pre_entry = build_pre_tool_use_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
-    let notif_entry = build_notification_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
+    write_saved_config(&mut s, &SavedNotifyConfig::from(&args));
 
     if args.enabled {
-        // Restore from backup if needed
-        if s.get("_hooksBackup").is_some() && s.get("hooks").is_none() {
-            if let Some(backup) = s.get("_hooksBackup").cloned() {
-                if let Some(obj) = s.as_object_mut() {
-                    obj.insert("hooks".to_string(), backup);
-                    obj.remove("_hooksBackup");
-                }
-            }
-        }
-
         // Ensure hooks object exists
         if s.get("hooks").is_none() {
             if let Some(obj) = s.as_object_mut() {
                 obj.insert("hooks".to_string(), Value::Object(Default::default()));
             }
         }
+
+        let stop_entry = build_stop_entry(&args.sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
+        let pre_entry = build_pre_tool_use_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
+        let notif_entry = build_notification_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
 
         if let Some(hooks) = s.get_mut("hooks").and_then(|h| h.as_object_mut()) {
             let existing_stop = hooks.get("Stop").cloned().unwrap_or(Value::Array(vec![]));
@@ -568,26 +602,58 @@ fn test_gchat(webhook: String) -> Value {
 
 #[tauri::command]
 fn test_happy() -> Value {
-    let happy_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join("AppData")
-        .join("Roaming")
-        .join("npm")
-        .join("happy.cmd");
+    let happy_path = get_happy_path();
     if !happy_path.exists() {
         return serde_json::json!({
             "ok": false,
             "error": "happy-coder not installed. Run: npm install -g happy-coder"
         });
     }
-    let output = Command::new("cmd")
+    let output = Command::new(&happy_path)
         .creation_flags(CREATE_NO_WINDOW)
+        .args(["notify", "-t", "Test", "-p", "Test from Claude Notify"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => serde_json::json!({ "ok": true }),
+        Ok(o) => serde_json::json!({
+            "ok": false,
+            "error": String::from_utf8_lossy(&o.stderr).to_string()
+        }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+#[tauri::command]
+fn test_toast() -> Value {
+    let script_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".claude");
+    let _ = std::fs::create_dir_all(&script_dir);
+    let ps_path = script_dir.join("claude-notify-balloon.ps1");
+    let ps_content = r#"param([string]$Title, [string]$Message)
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    $b = New-Object System.Windows.Forms.NotifyIcon
+    $b.Icon = [System.Drawing.SystemIcons]::Information
+    $b.BalloonTipTitle = $Title
+    $b.BalloonTipText = $Message
+    $b.Visible = $true
+    $b.ShowBalloonTip(6000)
+    Start-Sleep -Seconds 5
+    $b.Dispose()
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
+"#;
+    let _ = std::fs::write(&ps_path, ps_content);
+    let output = Command::new("powershell.exe")
         .args([
-            "/c",
-            &format!(
-                "\"{}\" notify -t \"Test\" -p \"Test from Claude Notify\"",
-                happy_path.to_string_lossy()
-            ),
+            "-WindowStyle", "Hidden",
+            "-ExecutionPolicy", "Bypass",
+            "-File", &ps_path.to_string_lossy(),
+            "-Title", "Claude Code",
+            "-Message", "Test notification",
         ])
         .output();
     match output {
@@ -607,7 +673,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            // Build tray menu
             let open_item = MenuItemBuilder::with_id("open", "Open Settings").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
@@ -616,7 +681,6 @@ pub fn run() {
                 .item(&quit_item)
                 .build()?;
 
-            // Build tray icon
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Claude Code Notifications")
@@ -652,7 +716,6 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Hide window on close instead of exiting
             if let Some(win) = app.get_webview_window("main") {
                 let win_clone = win.clone();
                 win.on_window_event(move |event| {
@@ -671,6 +734,7 @@ pub fn run() {
             test_sound,
             test_gchat,
             test_happy,
+            test_toast,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

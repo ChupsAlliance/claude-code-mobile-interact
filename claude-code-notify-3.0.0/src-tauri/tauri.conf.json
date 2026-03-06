@@ -14,8 +14,8 @@
       {
         "title": "Claude Code — Notifications",
         "width": 360,
-        "height": 640,
-        "resizable": false,
+        "height": 740,
+        "resizable": true,
         "visible": false,
         "skipTaskbar": true,
         "decorations": true,
