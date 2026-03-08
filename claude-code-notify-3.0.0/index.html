@@ -33,7 +33,8 @@
       padding: 18px 18px 14px;
       user-select: none;
       -webkit-app-region: no-drag;
-      overflow: hidden;
+      overflow-y: auto;
+      overflow-x: hidden;
     }
 
     /* ── Header ────────────────────────────────────── */
@@ -176,6 +177,77 @@
     .status-bar.info { color: #60a5fa; }
     .status-bar svg { width: 12px; height: 12px; flex-shrink: 0; }
 
+    /* ── Happy status dot ────────────────────────── */
+    .happy-status {
+      display: flex; align-items: center; gap: 5px;
+      margin-top: 8px; font-size: 11px; color: var(--muted);
+    }
+    .happy-status-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #3f3f46; flex-shrink: 0;
+      transition: background .3s, box-shadow .3s;
+    }
+    .happy-status-dot.connected { background: var(--success); box-shadow: 0 0 4px var(--success); }
+    .happy-status-dot.warning   { background: #f59e0b; box-shadow: 0 0 4px #f59e0b; }
+    .happy-status-dot.error     { background: var(--danger); }
+
+    /* ── Setup rows ───────────────────────────────── */
+    .setup-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0;
+      font-size: 12px;
+    }
+    .setup-row + .setup-row { border-top: 1px solid var(--border); }
+    .setup-label { font-weight: 500; min-width: 85px; }
+    .setup-value { flex: 1; color: var(--muted); font-size: 11px; }
+    .btn-setup {
+      padding: 3px 10px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'Inter', sans-serif;
+      cursor: pointer;
+      transition: background .15s, opacity .15s;
+      flex-shrink: 0;
+    }
+    .btn-setup:hover { background: var(--accent-dim); }
+    .btn-setup:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* ── Workspace quick-pick ─────────────────── */
+    .ws-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background .15s;
+      font-size: 12px;
+    }
+    .ws-item:hover { background: rgba(99,102,241,0.12); }
+    .ws-item:active { background: rgba(99,102,241,0.2); }
+    .ws-name { font-weight: 500; flex-shrink: 0; }
+    .ws-path { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ws-launch {
+      margin-left: auto;
+      flex-shrink: 0;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity .15s;
+    }
+    .ws-item:hover .ws-launch { opacity: 1; }
+    .ws-launch svg { width: 12px; height: 12px; }
+    .ws-empty { font-size: 11px; color: var(--muted); padding: 4px 0; }
+
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { transition-duration: .01ms !important; }
     }
@@ -205,7 +277,7 @@
     <div class="row">
       <div>
         <div class="row-label">Enable notifications</div>
-        <div class="row-desc">Sound + push via Google Chat</div>
+        <div class="row-desc">Sound + toast + push on all events</div>
       </div>
       <label class="switch" title="Toggle notifications">
         <input type="checkbox" id="toggleInput" aria-label="Enable notifications">
@@ -237,11 +309,94 @@
         <div class="row-label">Windows toast notifications</div>
         <div class="row-desc">Show popup in Action Center</div>
       </div>
-      <label class="switch" title="Toggle toast notifications">
-        <input type="checkbox" id="toastInput" aria-label="Windows toast notifications">
-        <span class="track"></span>
-        <span class="thumb"></span>
-      </label>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button class="btn-icon" id="testToastBtn" title="Test toast notification" aria-label="Test toast notification">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+        </button>
+        <label class="switch" title="Toggle toast notifications">
+          <input type="checkbox" id="toastInput" aria-label="Windows toast notifications">
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Happy — setup + notification + session -->
+  <div class="card" id="happyCard">
+    <div class="sec-label">Happy — mobile interaction</div>
+
+    <!-- Setup steps -->
+    <div id="happySetup">
+      <div class="setup-row" id="stepNode">
+        <span class="happy-status-dot" id="stepNodeDot"></span>
+        <span class="setup-label">Node.js</span>
+        <span class="setup-value" id="stepNodeText">Checking...</span>
+      </div>
+      <div class="setup-row" id="stepInstall">
+        <span class="happy-status-dot" id="stepInstallDot"></span>
+        <span class="setup-label">happy-coder</span>
+        <span class="setup-value" id="stepInstallText">Checking...</span>
+        <button class="btn-setup" id="installHappyBtn" style="display:none;">Install</button>
+      </div>
+      <div class="setup-row" id="stepPair">
+        <span class="happy-status-dot" id="stepPairDot"></span>
+        <span class="setup-label">Phone paired</span>
+        <span class="setup-value" id="stepPairText">Checking...</span>
+        <button class="btn-setup" id="pairHappyBtn" style="display:none;">Pair</button>
+      </div>
+    </div>
+
+    <!-- Push notification toggle (shown when installed) -->
+    <div class="row" id="happyToggleRow" style="margin-top:10px;display:none;">
+      <div>
+        <div class="row-label">Push notification</div>
+        <div class="row-desc">Send to phone via Happy app</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button class="btn-icon" id="testHappyBtn" title="Test Happy notification" aria-label="Test Happy notification">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 2 11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+        <label class="switch" title="Toggle Happy notifications">
+          <input type="checkbox" id="happyInput" aria-label="Happy push notification">
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Session launcher (shown when installed) -->
+    <div id="happySessionSection" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
+      <div class="row-desc" style="margin-bottom:6px;">Launch two-way session</div>
+
+      <!-- Workspace quick-pick list -->
+      <div id="workspaceList" style="margin-bottom:6px;max-height:140px;overflow-y:auto;"></div>
+
+      <!-- Manual browse fallback -->
+      <div class="input-row">
+        <input class="field" type="text" id="happyProjectDir"
+               placeholder="Or browse a directory..."
+               readonly aria-label="Project directory for Happy session">
+        <button class="btn-icon" id="browseHappyDirBtn" title="Browse project directory" aria-label="Browse project directory">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+        </button>
+        <button class="btn-icon" id="launchHappyBtn" title="Launch Happy session" aria-label="Launch Happy session"
+                style="background:var(--accent);border-color:var(--accent-dim);color:#fff;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+        </button>
+      </div>
+      <div class="happy-status" id="happyRunningStatus" style="margin-top:6px;">
+        <span class="happy-status-dot" id="happyRunningDot"></span>
+        <span id="happyRunningText">No active session</span>
+      </div>
     </div>
   </div>
 
@@ -282,28 +437,6 @@
           <polygon points="5 3 19 12 5 21 5 3"/>
         </svg>
       </button>
-    </div>
-  </div>
-
-  <!-- Happy push notification -->
-  <div class="card">
-    <div class="row">
-      <div>
-        <div class="row-label">Happy push notification</div>
-        <div class="row-desc">Send to phone via Happy app</div>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <button class="btn-icon" id="testHappyBtn" title="Test Happy notification" aria-label="Test Happy notification">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 2 11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
-        </button>
-        <label class="switch" title="Toggle Happy notifications">
-          <input type="checkbox" id="happyInput" aria-label="Happy push notification">
-          <span class="track"></span>
-          <span class="thumb"></span>
-        </label>
-      </div>
     </div>
   </div>
 

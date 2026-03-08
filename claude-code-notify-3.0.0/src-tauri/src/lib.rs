@@ -59,16 +59,26 @@ struct SavedNotifyConfig {
     toast_enabled: bool,
     #[serde(default)]
     happy_enabled: bool,
+    #[serde(default)]
+    happy_project_dir: String,
 }
 
 impl From<&SaveConfigArgs> for SavedNotifyConfig {
     fn from(a: &SaveConfigArgs) -> Self {
+        // Preserve existing happy_project_dir when saving config
+        let existing_dir = {
+            let s = read_settings();
+            load_saved_config(&s)
+                .map(|c| c.happy_project_dir)
+                .unwrap_or_default()
+        };
         SavedNotifyConfig {
             sound_path: a.sound_path.clone(),
             ask_sound_path: a.ask_sound_path.clone(),
             gchat_webhook: a.gchat_webhook.clone(),
             toast_enabled: a.toast_enabled,
             happy_enabled: a.happy_enabled,
+            happy_project_dir: existing_dir,
         }
     }
 }
@@ -188,6 +198,8 @@ fn is_claude_notify_hook(cmd: &str) -> bool {
         || cmd.contains("claude-notify-toast.ps1")
         || cmd.contains("claude-notify-toast.cjs")
         || cmd.contains("claude-notify-balloon.ps1")
+        || cmd.contains("claude-notify-happy.cjs")
+        || cmd.contains("claude-notify-gchat.cjs")
         || (cmd.contains("happy") && cmd.contains("notify"))
 }
 
@@ -311,69 +323,50 @@ pub struct SaveConfigArgs {
 
 // ── Hook command builders ─────────────────────────────────────
 
-fn sound_command(path: &str) -> Value {
-    serde_json::json!({
-        "type": "command",
-        "command": format!(
-            "powershell.exe -c \"try {{ (New-Object Media.SoundPlayer '{}').PlaySync() }} catch {{}}; exit 0\"",
-            path
-        )
-    })
-}
 
 fn toast_command(title: &str, message: &str) -> Value {
-    // Use a Node.js wrapper: reads stdin JSON for cwd, then shows balloon via PowerShell
     let script_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".claude");
     let _ = std::fs::create_dir_all(&script_dir);
 
-    // Simple PS1 that shows a balloon tip (works without WinRT suppression issues)
-    let ps_path = script_dir.join("claude-notify-balloon.ps1");
+    // Write toast PS1 script (also used by test_toast)
+    let ps_path = script_dir.join("claude-notify-toast.ps1");
     let ps_content = r#"param([string]$Title, [string]$Message)
 try {
-    Add-Type -AssemblyName System.Windows.Forms
-    $b = New-Object System.Windows.Forms.NotifyIcon
-    $b.Icon = [System.Drawing.SystemIcons]::Information
-    $b.BalloonTipTitle = $Title
-    $b.BalloonTipText = $Message
-    $b.Visible = $true
-    $b.ShowBalloonTip(6000)
-    Start-Sleep -Seconds 5
-    $b.Dispose()
-} catch {}
-exit 0
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
+
+    $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+
+    $template = @"
+<toast>
+  <visual>
+    <binding template="ToastGeneric">
+      <text>$([System.Security.SecurityElement]::Escape($Title))</text>
+      <text>$([System.Security.SecurityElement]::Escape($Message))</text>
+    </binding>
+  </visual>
+  <audio silent="true"/>
+</toast>
+"@
+
+    $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $xml.LoadXml($template)
+    $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
 "#;
     let _ = std::fs::write(&ps_path, ps_content);
 
-    // Node wrapper reads stdin to extract project name, then spawns PS balloon
-    let wrapper_path = script_dir.join("claude-notify-toast.cjs");
+    // Direct PowerShell call — no node wrapper, avoids process tree kill issue
     let ps_path_fwd = ps_path.to_string_lossy().replace('\\', "/");
-    let wrapper_content = format!(
-        r#"'use strict';
-let d='';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data',c=>d+=c);
-process.stdin.on('end',()=>{{
-  let p='';
-  try{{ const j=JSON.parse(d); if(j.cwd) p=require('path').basename(j.cwd); }}catch{{}}
-  const msg = p ? `${{process.argv[3]}} - ${{p}}` : process.argv[3];
-  require('child_process').spawn('powershell.exe',
-    ['-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',
-     '{}','-Title',process.argv[2],'-Message',msg],
-    {{stdio:'ignore',detached:true}}).unref();
-}});
-setTimeout(()=>process.exit(0),3000);
-"#,
-        ps_path_fwd
-    );
-    let _ = std::fs::write(&wrapper_path, wrapper_content);
-
     let cmd = format!(
-        "node \"{}\" \"{}\" \"{}\"",
-        wrapper_path.to_string_lossy().replace('\\', "/"),
-        title,
-        message
+        "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" -Title \"{}\" -Message \"{}\"",
+        ps_path_fwd, title, message
     );
     serde_json::json!({ "type": "command", "command": cmd })
 }
@@ -385,26 +378,123 @@ fn gchat_card_json(title: &str, subtitle: &str, icon_url: &str, icon: &str) -> S
     )
 }
 
-fn gchat_command(webhook: &str, title: &str, subtitle: &str, icon_url: &str, icon: &str) -> Value {
-    let json_body = gchat_card_json(title, subtitle, icon_url, icon);
-    let ps_cmd = format!(
-        "try {{ Invoke-RestMethod -Uri '{}' -Method POST -ContentType 'application/json' -Body '{}' }} catch {{}}; exit 0",
-        webhook, json_body
-    );
-    serde_json::json!({
-        "type": "command",
-        "command": format!("powershell.exe -c \"{}\"", ps_cmd)
-    })
+fn generate_gchat_wrapper() -> PathBuf {
+    let script_dir = dirs::home_dir().unwrap_or_default().join(".claude");
+    let _ = fs::create_dir_all(&script_dir);
+    let wrapper_path = script_dir.join("claude-notify-gchat.cjs");
+    let content = r#"'use strict';
+let d='';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data',c=>d+=c);
+process.stdin.on('end',()=>{
+  let project='',title='Claude Code',subtitle='',iconUrl='',icon='BOOKMARK';
+  const ev=process.argv[2]||'stop';
+  const webhook=process.argv[3]||'';
+  if(!webhook){process.exit(0);}
+  try{
+    const j=JSON.parse(d);
+    if(j.cwd) project=require('path').basename(j.cwd);
+    if(ev==='stop'){
+      title=project?`[${project}] Task Finished`:'Task Finished';
+      subtitle=j.last_assistant_message?j.last_assistant_message.substring(0,300).replace(/[\r\n]+/g,' '):'Claude Code finished a task';
+      iconUrl='https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2705.png';
+      icon='BOOKMARK';
+    }else if(ev==='pre_tool_use'){
+      title=project?`[${project}] Question`:'Question';
+      let q='Claude Code is asking a question';
+      if(j.tool_input){
+        const qs=j.tool_input.questions;
+        if(Array.isArray(qs)&&qs.length>0) q=qs[0].question||q;
+        else if(j.tool_input.question) q=j.tool_input.question;
+      }
+      subtitle=q.substring(0,300).replace(/[\r\n]+/g,' ');
+      iconUrl='https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2753.png';
+      icon='PERSON';
+    }else if(ev==='notification'){
+      title=project?`[${project}] Attention`:'Attention';
+      subtitle=j.message||'Claude Code needs attention';
+      iconUrl='https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f514.png';
+      icon='DESCRIPTION';
+    }else if(ev==='session_end'){
+      title=project?`[${project}] Session Ended`:'Session Ended';
+      subtitle='Claude Code session has ended';
+      iconUrl='https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f6d1.png';
+      icon='BOOKMARK';
+    }else if(ev==='permission_request'){
+      title=project?`[${project}] Permission`:'Permission';
+      subtitle=j.tool_name?`Permission needed for ${j.tool_name}`:'Claude Code needs permission';
+      iconUrl='https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f512.png';
+      icon='PERSON';
+    }
+  }catch{}
+  const card=JSON.stringify({cardsV2:[{cardId:'claude-notify',card:{
+    header:{title,subtitle:subtitle.substring(0,200),imageUrl:iconUrl,imageType:'CIRCLE'},
+    sections:[{widgets:[{decoratedText:{startIcon:{knownIcon:icon},text:subtitle.substring(0,300)}}]}]
+  }}]});
+  const escaped=card.replace(/'/g,"''");
+  require('child_process').spawn(
+    'powershell.exe',
+    ['-WindowStyle','Hidden','-c',
+     `try { Invoke-RestMethod -Uri '${webhook}' -Method POST -ContentType 'application/json' -Body '${escaped}' } catch {}; exit 0`],
+    {stdio:'ignore',detached:true}).unref();
+});
+setTimeout(()=>process.exit(0),5000);
+"#;
+    let _ = fs::write(&wrapper_path, content);
+    wrapper_path
 }
 
-fn happy_command(title: &str, message: &str) -> Value {
-    let cmd = format!(
-        "cmd /c \"\"{}\" notify -t \"{}\" -p \"{}\"\"",
-        get_happy_path().to_string_lossy(),
-        title,
-        message
+fn generate_happy_wrapper() -> PathBuf {
+    let script_dir = dirs::home_dir().unwrap_or_default().join(".claude");
+    let _ = fs::create_dir_all(&script_dir);
+    let wrapper_path = script_dir.join("claude-notify-happy.cjs");
+    let happy_path_fwd = get_happy_path().to_string_lossy().replace('\\', "/");
+    let content = format!(
+        r#"'use strict';
+const fs=require('fs');
+const cp=require('child_process');
+const path=require('path');
+let d='';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data',c=>d+=c);
+process.stdin.on('end',()=>{{
+  let project='',body='',cwd='';
+  const ev=process.argv[2]||'stop';
+  const hp='{}';
+  try{{
+    const j=JSON.parse(d);
+    cwd=j.cwd||'';
+    if(cwd) project=path.basename(cwd);
+    if(ev==='stop'){{
+      body=j.last_assistant_message?j.last_assistant_message.substring(0,200):'Task completed';
+    }}else if(ev==='pre_tool_use'){{
+      if(j.tool_input){{
+        const q=j.tool_input.questions;
+        if(Array.isArray(q)&&q.length>0) body=q[0].question||'Needs your input';
+        else body=j.tool_input.question||'Needs your input';
+      }}else body='Needs your input';
+    }}else if(ev==='notification'){{
+      body=j.message||'Needs attention';
+    }}else if(ev==='session_end'){{
+      body='Session ended';
+    }}else if(ev==='permission_request'){{
+      body=j.tool_name?`Permission for ${{j.tool_name}}`:'Permission needed';
+    }}
+  }}catch{{}}
+  const labels={{stop:'Done',pre_tool_use:'Question',notification:'Alert',session_end:'Ended',permission_request:'Permission'}};
+  const title=project?`[${{project}}] ${{labels[ev]||'Claude Code'}}`:'Claude Code';
+  const b=body||'Claude Code';
+  const t=title.replace(/"/g,'');
+  const m=b.replace(/"/g,'').substring(0,200);
+  // Send push notification
+  cp.exec(`"${{hp}}" notify -t "${{t}}" -p "${{m}}"`,{{timeout:10000}},()=>{{}});
+}});
+setTimeout(()=>process.exit(0),15000);
+"#,
+        happy_path_fwd
     );
-    serde_json::json!({ "type": "command", "command": cmd })
+    let _ = fs::write(&wrapper_path, content);
+    wrapper_path
 }
 
 fn build_cn_hooks(
@@ -412,34 +502,66 @@ fn build_cn_hooks(
     webhook: &str,
     toast: bool,
     happy: bool,
-    happy_title: &str,
-    happy_msg: &str,
-    gchat_title: &str,
-    gchat_subtitle: &str,
-    gchat_icon_url: &str,
-    gchat_icon: &str,
+    event_type: &str,
     toast_msg: &str,
 ) -> Vec<Value> {
-    let mut hooks = vec![sound_command(sound)];
-    if !webhook.is_empty() {
-        hooks.push(gchat_command(webhook, gchat_title, gchat_subtitle, gchat_icon_url, gchat_icon));
-    }
+    // Generate wrapper scripts as side effects
     if toast {
-        hooks.push(toast_command("Claude Code", toast_msg));
+        toast_command("Claude Code", toast_msg); // writes .ps1 file
     }
     if happy {
-        hooks.push(happy_command(happy_title, happy_msg));
+        generate_happy_wrapper(); // writes .cjs file
     }
-    hooks
+    if !webhook.is_empty() {
+        generate_gchat_wrapper(); // writes .cjs file
+    }
+
+    // Build a single combined command that runs everything in parallel
+    let script_dir = dirs::home_dir().unwrap_or_default().join(".claude");
+    let _ = std::fs::create_dir_all(&script_dir);
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Sound — run inline (fast)
+    parts.push(format!(
+        "try {{ (New-Object Media.SoundPlayer '{}').PlaySync() }} catch {{}}", sound
+    ));
+
+    // Toast — fire and forget via Start-Process
+    if toast {
+        let ps_path = script_dir.join("claude-notify-toast.ps1").to_string_lossy().replace('\\', "/");
+        parts.push(format!(
+            "Start-Process -WindowStyle Hidden powershell.exe '-ExecutionPolicy Bypass -File \"{}\" -Title \"Claude Code\" -Message \"{}\"'",
+            ps_path, toast_msg
+        ));
+    }
+
+    // Happy — fire and forget via Start-Process
+    if happy {
+        let wrapper = script_dir.join("claude-notify-happy.cjs").to_string_lossy().replace('\\', "/");
+        parts.push(format!(
+            "Start-Process -WindowStyle Hidden node '\"{wrapper}\" \"{event_type}\"'"
+        ));
+    }
+
+    // GChat — fire and forget via Start-Process
+    if !webhook.is_empty() {
+        let wrapper = script_dir.join("claude-notify-gchat.cjs").to_string_lossy().replace('\\', "/");
+        parts.push(format!(
+            "Start-Process -WindowStyle Hidden node '\"{wrapper}\" \"{event_type}\" \"{webhook}\"'"
+        ));
+    }
+
+    let combined = parts.join("; ");
+    let cmd = format!("powershell.exe -c \"{combined}; exit 0\"");
+
+    vec![serde_json::json!({ "type": "command", "command": cmd })]
 }
 
 fn build_stop_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
     let hooks = build_cn_hooks(
         sound, webhook, toast, happy,
-        "Claude Code", "Task finished",
-        "Task Finished", "Claude Code finished a task",
-        "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2705.png",
-        "BOOKMARK", "Claude Code finished a task",
+        "stop", "Claude Code finished a task",
     );
     serde_json::json!({ "hooks": hooks })
 }
@@ -447,10 +569,7 @@ fn build_stop_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Val
 fn build_pre_tool_use_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
     let hooks = build_cn_hooks(
         sound, webhook, toast, happy,
-        "Claude Code", "Asking a question",
-        "Question", "Claude Code is asking a question",
-        "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2753.png",
-        "PERSON", "Claude Code is asking a question",
+        "pre_tool_use", "Claude Code is asking a question",
     );
     serde_json::json!({ "matcher": "AskUserQuestion", "hooks": hooks })
 }
@@ -458,10 +577,23 @@ fn build_pre_tool_use_entry(sound: &str, webhook: &str, toast: bool, happy: bool
 fn build_notification_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
     let hooks = build_cn_hooks(
         sound, webhook, toast, happy,
-        "Claude Code", "Needs attention",
-        "Attention", "Claude Code needs attention",
-        "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f514.png",
-        "DESCRIPTION", "Claude Code needs attention",
+        "notification", "Claude Code needs attention",
+    );
+    serde_json::json!({ "hooks": hooks })
+}
+
+fn build_session_end_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
+    let hooks = build_cn_hooks(
+        sound, webhook, toast, happy,
+        "session_end", "Claude Code session ended",
+    );
+    serde_json::json!({ "hooks": hooks })
+}
+
+fn build_permission_request_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
+    let hooks = build_cn_hooks(
+        sound, webhook, toast, happy,
+        "permission_request", "Claude Code needs permission",
     );
     serde_json::json!({ "hooks": hooks })
 }
@@ -495,7 +627,10 @@ fn get_config() -> Config {
         gchat_webhook: extract_gchat_from_hooks(&s).unwrap_or_default(),
         auto_start: get_auto_start_enabled(),
         toast_enabled: detect_cmd_in_hooks(&s, |cmd| cmd.contains("ToastNotificationManager")),
-        happy_enabled: detect_cmd_in_hooks(&s, |cmd| cmd.contains("happy") && cmd.contains("notify")),
+        happy_enabled: detect_cmd_in_hooks(&s, |cmd| {
+            (cmd.contains("happy") && cmd.contains("notify"))
+            || cmd.contains("claude-notify-happy.cjs")
+        }),
     }
 }
 
@@ -519,20 +654,26 @@ fn save_config(args: SaveConfigArgs) -> Value {
         let stop_entry = build_stop_entry(&args.sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
         let pre_entry = build_pre_tool_use_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
         let notif_entry = build_notification_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
+        let session_end_entry = build_session_end_entry(&args.sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
+        let permission_entry = build_permission_request_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
 
         if let Some(hooks) = s.get_mut("hooks").and_then(|h| h.as_object_mut()) {
             let existing_stop = hooks.get("Stop").cloned().unwrap_or(Value::Array(vec![]));
             let existing_pre = hooks.get("PreToolUse").cloned().unwrap_or(Value::Array(vec![]));
             let existing_notif = hooks.get("Notification").cloned().unwrap_or(Value::Array(vec![]));
+            let existing_se = hooks.get("SessionEnd").cloned().unwrap_or(Value::Array(vec![]));
+            let existing_pr = hooks.get("PermissionRequest").cloned().unwrap_or(Value::Array(vec![]));
 
             hooks.insert("Stop".to_string(), merge_cn_entry(&existing_stop, stop_entry));
             hooks.insert("PreToolUse".to_string(), merge_cn_entry(&existing_pre, pre_entry));
             hooks.insert("Notification".to_string(), merge_cn_entry(&existing_notif, notif_entry));
+            hooks.insert("SessionEnd".to_string(), merge_cn_entry(&existing_se, session_end_entry));
+            hooks.insert("PermissionRequest".to_string(), merge_cn_entry(&existing_pr, permission_entry));
         }
     } else {
         // Disable: remove only CN hooks, keep others
         if let Some(hooks) = s.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-            for key in &["Stop", "PreToolUse", "Notification"] {
+            for key in &["Stop", "PreToolUse", "Notification", "SessionEnd", "PermissionRequest"] {
                 if let Some(arr) = hooks.get(*key).and_then(|v| v.as_array()) {
                     let remaining = filter_out_cn_entries(arr);
                     if remaining.is_empty() {
@@ -625,29 +766,19 @@ fn test_happy() -> Value {
 
 #[tauri::command]
 fn test_toast() -> Value {
-    let script_dir = dirs::home_dir()
+    let ps_path = dirs::home_dir()
         .unwrap_or_default()
-        .join(".claude");
-    let _ = std::fs::create_dir_all(&script_dir);
-    let ps_path = script_dir.join("claude-notify-balloon.ps1");
-    let ps_content = r#"param([string]$Title, [string]$Message)
-try {
-    Add-Type -AssemblyName System.Windows.Forms
-    $b = New-Object System.Windows.Forms.NotifyIcon
-    $b.Icon = [System.Drawing.SystemIcons]::Information
-    $b.BalloonTipTitle = $Title
-    $b.BalloonTipText = $Message
-    $b.Visible = $true
-    $b.ShowBalloonTip(6000)
-    Start-Sleep -Seconds 5
-    $b.Dispose()
-} catch {
-    Write-Error $_.Exception.Message
-    exit 1
-}
-"#;
-    let _ = std::fs::write(&ps_path, ps_content);
+        .join(".claude")
+        .join("claude-notify-toast.ps1");
+
+    // Ensure the toast script exists (toast_command also writes it, but test may run standalone)
+    if !ps_path.exists() {
+        // Generate it by calling toast_command (which writes the file as side effect)
+        toast_command("Claude Code", "Test notification");
+    }
+
     let output = Command::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-WindowStyle", "Hidden",
             "-ExecutionPolicy", "Bypass",
@@ -666,6 +797,377 @@ try {
     }
 }
 
+// ── Happy integration commands ────────────────────────────────
+
+fn find_npm() -> Option<PathBuf> {
+    // 1. System Node.js install (most common)
+    let system = PathBuf::from(r"C:\Program Files\nodejs\npm.cmd");
+    if system.exists() {
+        return Some(system);
+    }
+    // 2. User AppData npm
+    let user = dirs::home_dir()
+        .unwrap_or_default()
+        .join("AppData")
+        .join("Roaming")
+        .join("npm")
+        .join("npm.cmd");
+    if user.exists() {
+        return Some(user);
+    }
+    // 3. Try PATH via `where npm.cmd`
+    if let Ok(output) = Command::new("cmd")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/c", "where npm.cmd"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            let p = PathBuf::from(line.trim());
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn find_node() -> Option<PathBuf> {
+    let system = PathBuf::from(r"C:\Program Files\nodejs\node.exe");
+    if system.exists() {
+        return Some(system);
+    }
+    // Try PATH via cmd
+    if let Ok(output) = Command::new("cmd")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/c", "where node.exe"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            let p = PathBuf::from(line.trim());
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn check_node_installed() -> bool {
+    find_node().is_some()
+}
+
+#[derive(Serialize)]
+pub struct HappyStatus {
+    node_installed: bool,
+    installed: bool,
+    authenticated: bool,
+    status_text: String,
+}
+
+#[tauri::command]
+fn get_happy_status() -> HappyStatus {
+    let node_ok = check_node_installed();
+    if !node_ok {
+        return HappyStatus {
+            node_installed: false,
+            installed: false,
+            authenticated: false,
+            status_text: "Node.js not found".to_string(),
+        };
+    }
+
+    let happy_path = get_happy_path();
+    if !happy_path.exists() {
+        return HappyStatus {
+            node_installed: true,
+            installed: false,
+            authenticated: false,
+            status_text: "Not installed".to_string(),
+        };
+    }
+
+    let output = Command::new(&happy_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["auth", "status"])
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            let combined = format!("{}{}", stdout, stderr).to_lowercase();
+
+            let authenticated = combined.contains("authenticated")
+                && !combined.contains("not authenticated")
+                && !combined.contains("unauthenticated");
+
+            let status_text = if authenticated {
+                "Connected".to_string()
+            } else {
+                "Not paired".to_string()
+            };
+
+            HappyStatus {
+                node_installed: true,
+                installed: true,
+                authenticated,
+                status_text,
+            }
+        }
+        Err(_) => HappyStatus {
+            node_installed: true,
+            installed: true,
+            authenticated: false,
+            status_text: "Status check failed".to_string(),
+        },
+    }
+}
+
+#[tauri::command]
+fn install_happy() -> Value {
+    if !check_node_installed() {
+        return serde_json::json!({
+            "ok": false,
+            "error": "Node.js is not installed. Please install Node.js >= 18 first."
+        });
+    }
+
+    let npm_path = match find_npm() {
+        Some(p) => p,
+        None => {
+            return serde_json::json!({
+                "ok": false,
+                "error": "npm not found. Ensure Node.js is installed and restart the app."
+            });
+        }
+    };
+
+    let output = Command::new(&npm_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["install", "-g", "happy-coder"])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            // Verify installation
+            if get_happy_path().exists() {
+                serde_json::json!({ "ok": true })
+            } else {
+                serde_json::json!({
+                    "ok": false,
+                    "error": "Install completed but happy.cmd not found. Try restarting the app."
+                })
+            }
+        }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            serde_json::json!({
+                "ok": false,
+                "error": if err.is_empty() { "npm install failed".to_string() } else { err }
+            })
+        }
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+#[tauri::command]
+fn pair_happy() -> Value {
+    let happy_path = get_happy_path();
+    if !happy_path.exists() {
+        return serde_json::json!({
+            "ok": false,
+            "error": "happy-coder not installed yet"
+        });
+    }
+
+    // Open a terminal with `happy auth login` so user can scan QR
+    let hp = happy_path.to_string_lossy().to_string();
+    let result = Command::new("cmd")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/c", "start", "", "cmd", "/k", &hp, "auth", "login"])
+        .spawn();
+
+    match result {
+        Ok(_) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+#[tauri::command]
+fn get_happy_project_dir() -> String {
+    let s = read_settings();
+    load_saved_config(&s)
+        .map(|c| c.happy_project_dir)
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_happy_project_dir(dir: String) {
+    let mut s = read_settings();
+    if let Some(mut cfg) = load_saved_config(&s) {
+        cfg.happy_project_dir = dir;
+        write_saved_config(&mut s, &cfg);
+        write_settings(&s);
+    }
+}
+
+#[tauri::command]
+fn launch_happy_session(cwd: String) -> Value {
+    let happy_path = get_happy_path();
+    if !happy_path.exists() {
+        return serde_json::json!({
+            "ok": false,
+            "error": "happy-coder not installed. Run: npm install -g happy-coder"
+        });
+    }
+
+    let dir = if cwd.is_empty() {
+        dirs::home_dir().unwrap_or_default().to_string_lossy().to_string()
+    } else {
+        cwd.clone()
+    };
+
+    // Save last-used directory
+    let mut s = read_settings();
+    if let Some(mut cfg) = load_saved_config(&s) {
+        cfg.happy_project_dir = dir.clone();
+        write_saved_config(&mut s, &cfg);
+        write_settings(&s);
+    }
+
+    let hp = happy_path.to_string_lossy().to_string();
+    // Write a temp batch file to avoid cmd escaping issues
+    let batch_dir = dirs::home_dir().unwrap_or_default().join(".claude");
+    let _ = fs::create_dir_all(&batch_dir);
+    let batch_path = batch_dir.join("claude-notify-launch-happy.cmd");
+    let batch_content = format!("@echo off\ncd /d \"{}\"\n\"{}\"", dir, hp);
+    let _ = fs::write(&batch_path, batch_content);
+
+    let result = Command::new("cmd")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/c", "start", "", "cmd", "/k", &batch_path.to_string_lossy().to_string()])
+        .spawn();
+
+    match result {
+        Ok(_) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+#[tauri::command]
+fn check_happy_running() -> Value {
+    let ps_cmd = r#"(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'happy' } | Measure-Object).Count"#;
+    let output = Command::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-c", ps_cmd])
+        .output();
+
+    let running = match output {
+        Ok(o) => {
+            let count_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            count_str.parse::<i32>().unwrap_or(0) > 0
+        }
+        Err(_) => false,
+    };
+
+    serde_json::json!({ "running": running })
+}
+
+// ── VSCode workspace detection ────────────────────────────────
+
+#[derive(Serialize)]
+pub struct VscodeWorkspace {
+    path: String,
+    name: String,
+    last_used: u64, // seconds since epoch
+}
+
+#[tauri::command]
+fn detect_vscode_workspaces() -> Vec<VscodeWorkspace> {
+    let storage_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join("AppData")
+        .join("Roaming")
+        .join("Code")
+        .join("User")
+        .join("workspaceStorage");
+
+    let mut workspaces: Vec<VscodeWorkspace> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&storage_dir) {
+        for entry in entries.flatten() {
+            let ws_json = entry.path().join("workspace.json");
+            if !ws_json.exists() {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&ws_json) {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&content) {
+                    if let Some(folder_uri) = parsed.get("folder").and_then(|v| v.as_str()) {
+                        // Decode file:/// URI to path
+                        if let Some(path) = decode_file_uri(folder_uri) {
+                            if std::path::Path::new(&path).exists() {
+                                let name = std::path::Path::new(&path)
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
+
+                                // Use parent dir modification time as proxy for "last used"
+                                let last_used = entry
+                                    .metadata()
+                                    .ok()
+                                    .and_then(|m| m.modified().ok())
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+
+                                workspaces.push(VscodeWorkspace { path, name, last_used });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by last_used descending (most recent first)
+    workspaces.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    // Return top 10
+    workspaces.truncate(10);
+    workspaces
+}
+
+fn decode_file_uri(uri: &str) -> Option<String> {
+    let path_str = uri.strip_prefix("file:///")?;
+    // Percent-decode
+    let decoded = percent_decode(path_str);
+    // Convert forward slashes to backslashes for Windows, then normalize
+    let normalized = decoded.replace('/', "\\");
+    // Add drive letter colon back: e%3A -> E:
+    Some(normalized)
+}
+
+fn percent_decode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+            } else {
+                result.push('%');
+                result.push_str(&hex);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 // ── App Setup ─────────────────────────────────────────────────
 
 pub fn run() {
@@ -673,9 +1175,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            let launch_happy = MenuItemBuilder::with_id("launch_happy", "Launch Happy Session").build(app)?;
             let open_item = MenuItemBuilder::with_id("open", "Open Settings").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
+                .item(&launch_happy)
                 .item(&open_item)
                 .separator()
                 .item(&quit_item)
@@ -686,9 +1190,34 @@ pub fn run() {
                 .tooltip("Claude Code Notifications")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
+                    "launch_happy" => {
+                        let happy_path = get_happy_path();
+                        if happy_path.exists() {
+                            let s = read_settings();
+                            let dir = load_saved_config(&s)
+                                .map(|c| c.happy_project_dir)
+                                .unwrap_or_default();
+                            let cwd = if dir.is_empty() {
+                                dirs::home_dir().unwrap_or_default().to_string_lossy().to_string()
+                            } else {
+                                dir
+                            };
+                            let hp = happy_path.to_string_lossy().to_string();
+                            let batch_dir = dirs::home_dir().unwrap_or_default().join(".claude");
+                            let _ = std::fs::create_dir_all(&batch_dir);
+                            let batch_path = batch_dir.join("claude-notify-launch-happy.cmd");
+                            let batch_content = format!("@echo off\ncd /d \"{}\"\n\"{}\"", cwd, hp);
+                            let _ = std::fs::write(&batch_path, batch_content);
+                            let _ = Command::new("cmd")
+                                .creation_flags(CREATE_NO_WINDOW)
+                                .args(["/c", "start", "", "cmd", "/k", &batch_path.to_string_lossy().to_string()])
+                                .spawn();
+                        }
+                    }
                     "open" => {
                         if let Some(win) = app.get_webview_window("main") {
                             let _ = win.show();
+                            let _ = win.unminimize();
                             let _ = win.set_focus();
                         }
                     }
@@ -709,6 +1238,7 @@ pub fn run() {
                                 let _ = win.hide();
                             } else {
                                 let _ = win.show();
+                                let _ = win.unminimize();
                                 let _ = win.set_focus();
                             }
                         }
@@ -726,6 +1256,36 @@ pub fn run() {
                 });
             }
 
+            // Background thread: monitor Happy session and update tray tooltip
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    let ps_cmd = r#"(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'happy' } | Measure-Object).Count"#;
+                    let running = Command::new("powershell.exe")
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .args(["-c", ps_cmd])
+                        .output()
+                        .map(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .trim()
+                                .parse::<i32>()
+                                .unwrap_or(0) > 0
+                        })
+                        .unwrap_or(false);
+
+                    let tooltip = if running {
+                        "Claude Notify — Happy session active"
+                    } else {
+                        "Claude Code Notifications"
+                    };
+
+                    if let Some(tray) = app_handle.tray_by_id("main-tray") {
+                        let _ = tray.set_tooltip(Some(tooltip));
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -735,6 +1295,14 @@ pub fn run() {
             test_gchat,
             test_happy,
             test_toast,
+            get_happy_status,
+            install_happy,
+            pair_happy,
+            get_happy_project_dir,
+            set_happy_project_dir,
+            launch_happy_session,
+            check_happy_running,
+            detect_vscode_workspaces,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

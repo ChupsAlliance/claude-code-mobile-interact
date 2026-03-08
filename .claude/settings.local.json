@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(cargo check)",
+      "Bash(cmd.exe /c \"where cargo\")",
+      "Bash(cmd.exe /c \"C:\\\\Users\\\\USER\\\\.cargo\\\\bin\\\\cargo.exe check --manifest-path E:\\\\Project\\\\claude-code-mobile-interact\\\\claude-code-notify-3.0.0\\\\src-tauri\\\\Cargo.toml 2>&1\")",
+      "Bash(export PATH=\"$PATH:/c/Users/USER/.cargo/bin\")",
+      "Bash(cargo check --manifest-path \"E:/Project/claude-code-mobile-interact/claude-code-notify-3.0.0/src-tauri/Cargo.toml\")",
+      "Bash(powershell.exe -c \"Get-Command cargo -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
+      "Bash(powershell.exe -c \"Get-Command rustc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source; Get-ChildItem ''C:\\\\Users\\\\USER\\\\.rustup'' -ErrorAction SilentlyContinue | Select-Object Name\")"
     ]
   }
 }
