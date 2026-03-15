@@ -263,12 +263,35 @@ fn get_auto_start_enabled() -> bool {
     }
 }
 
+fn get_installed_exe_path() -> Option<String> {
+    // Installed location: %LOCALAPPDATA%\claude-notify-app\claude-notify-app.exe
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let installed = std::path::PathBuf::from(&local_app_data)
+            .join("claude-notify-app")
+            .join("claude-notify-app.exe");
+        if installed.exists() {
+            return Some(installed.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 fn set_auto_start(enabled: bool) {
     if enabled {
-        let exe_path = std::env::current_exe()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        // Always use the installed exe path, never the dev/debug path
+        let exe_path = match get_installed_exe_path() {
+            Some(p) => p,
+            None => {
+                // Fallback: only allow if current exe is NOT in a target/debug or target/release dir
+                let current = std::env::current_exe().unwrap_or_default();
+                let current_str = current.to_string_lossy().to_string();
+                if current_str.contains("target\\debug") || current_str.contains("target\\release") || current_str.contains("target/debug") || current_str.contains("target/release") {
+                    // Dev mode — don't register auto-start
+                    return;
+                }
+                current_str
+            }
+        };
         let _ = Command::new("reg")
             .creation_flags(CREATE_NO_WINDOW)
             .args([
