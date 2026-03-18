@@ -12,6 +12,12 @@ use tauri::{
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+// ── FUTURE WORK: Happy Push Notifications ─────────────────────
+// Happy integration is disabled in this version (v3.0.2).
+// To re-enable: add `future_happy` to the default features in Cargo.toml.
+// All Happy code is preserved under #[cfg(feature = "future_happy")].
+// ─────────────────────────────────────────────────────────────
+
 fn settings_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
@@ -36,6 +42,7 @@ fn write_settings(data: &Value) {
     let _ = fs::write(&path, json);
 }
 
+#[cfg(feature = "future_happy")]
 fn get_happy_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
@@ -57,28 +64,40 @@ struct SavedNotifyConfig {
     gchat_webhook: String,
     #[serde(default)]
     toast_enabled: bool,
+    #[cfg(feature = "future_happy")]
     #[serde(default)]
     happy_enabled: bool,
+    #[cfg(feature = "future_happy")]
     #[serde(default)]
     happy_project_dir: String,
 }
 
 impl From<&SaveConfigArgs> for SavedNotifyConfig {
     fn from(a: &SaveConfigArgs) -> Self {
-        // Preserve existing happy_project_dir when saving config
-        let existing_dir = {
-            let s = read_settings();
-            load_saved_config(&s)
-                .map(|c| c.happy_project_dir)
-                .unwrap_or_default()
-        };
+        #[cfg(feature = "future_happy")]
+        {
+            // Preserve existing happy_project_dir when saving config
+            let existing_dir = {
+                let s = read_settings();
+                load_saved_config(&s)
+                    .map(|c| c.happy_project_dir)
+                    .unwrap_or_default()
+            };
+            return SavedNotifyConfig {
+                sound_path: a.sound_path.clone(),
+                ask_sound_path: a.ask_sound_path.clone(),
+                gchat_webhook: a.gchat_webhook.clone(),
+                toast_enabled: a.toast_enabled,
+                happy_enabled: a.happy_enabled,
+                happy_project_dir: existing_dir,
+            };
+        }
+        #[cfg(not(feature = "future_happy"))]
         SavedNotifyConfig {
             sound_path: a.sound_path.clone(),
             ask_sound_path: a.ask_sound_path.clone(),
             gchat_webhook: a.gchat_webhook.clone(),
             toast_enabled: a.toast_enabled,
-            happy_enabled: a.happy_enabled,
-            happy_project_dir: existing_dir,
         }
     }
 }
@@ -198,10 +217,14 @@ fn is_claude_notify_hook(cmd: &str) -> bool {
         || cmd.contains("claude-notify-toast.ps1")
         || cmd.contains("claude-notify-toast.cjs")
         || cmd.contains("claude-notify-balloon.ps1")
-        || cmd.contains("claude-notify-happy.cjs")
         || cmd.contains("claude-notify-gchat.cjs")
         || cmd.contains("claude-notify-hook.cjs")
-        || (cmd.contains("happy") && cmd.contains("notify"))
+        || {
+            #[cfg(feature = "future_happy")]
+            { cmd.contains("claude-notify-happy.cjs") || (cmd.contains("happy") && cmd.contains("notify")) }
+            #[cfg(not(feature = "future_happy"))]
+            { false }
+        }
 }
 
 /// Remove Claude Notify hook entries from a hook array, keeping all others.
@@ -331,6 +354,7 @@ pub struct Config {
     gchat_webhook: String,
     auto_start: bool,
     toast_enabled: bool,
+    #[cfg(feature = "future_happy")]
     happy_enabled: bool,
 }
 
@@ -342,6 +366,7 @@ pub struct SaveConfigArgs {
     gchat_webhook: String,
     auto_start: bool,
     toast_enabled: bool,
+    #[cfg(feature = "future_happy")]
     happy_enabled: bool,
 }
 
@@ -469,6 +494,7 @@ setTimeout(()=>process.exit(0),5000);
     wrapper_path
 }
 
+#[cfg(feature = "future_happy")]
 #[allow(dead_code)]
 fn generate_happy_wrapper() -> PathBuf {
     let script_dir = dirs::home_dir().unwrap_or_default().join(".claude");
@@ -524,13 +550,14 @@ setTimeout(()=>process.exit(0),15000);
 }
 
 /// Generate a single combined hook script that reads stdin and handles all
-/// notification channels (sound, toast, happy, gchat). Called once in save_config.
+/// notification channels (sound, toast, gchat). Called once in save_config.
+#[allow(unused_variables)]
 fn generate_hook_script(
     stop_sound: &str,
     ask_sound: &str,
     webhook: &str,
     toast: bool,
-    happy: bool,
+    #[cfg(feature = "future_happy")] happy: bool,
 ) {
     let script_dir = dirs::home_dir().unwrap_or_default().join(".claude");
     let _ = fs::create_dir_all(&script_dir);
@@ -540,6 +567,7 @@ fn generate_hook_script(
         toast_command("Claude Code", "");
     }
 
+    #[cfg(feature = "future_happy")]
     let happy_path = get_happy_path().to_string_lossy().replace('\\', "/");
     let toast_ps1 = script_dir.join("claude-notify-toast.ps1")
         .to_string_lossy().replace('\\', "/");
@@ -555,8 +583,7 @@ const STOP_SOUND='__STOP_SOUND__';
 const ASK_SOUND='__ASK_SOUND__';
 const TOAST=__TOAST__;
 const TOAST_PS1='__TOAST_PS1__';
-const HAPPY=__HAPPY__;
-const HP='__HAPPY_PATH__';
+// FUTURE_HAPPY: const HAPPY=__HAPPY__; const HP='__HAPPY_PATH__';
 const GCHAT='__GCHAT__';
 const ev=process.argv[2]||'stop';
 const tm=process.argv[3]||'Claude Code';
@@ -588,10 +615,9 @@ process.stdin.on('end',()=>{
   // Sound
   const snd=ev==='stop'?STOP_SOUND:ASK_SOUND;
   if(snd)try{cp.execSync('powershell.exe -WindowStyle Hidden -c "try{(New-Object Media.SoundPlayer \''+snd+'\').PlaySync()}catch{}"',{timeout:5000});}catch{}
-  // Toast
-  if(TOAST&&TOAST_PS1)cp.spawn('powershell.exe',['-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',TOAST_PS1,'-Title',title,'-Message',tm],{stdio:'ignore',detached:true}).unref();
-  // Happy
-  if(HAPPY&&HP)try{cp.execSync('"'+HP+'" notify -t "'+title.replace(/"/g,'')+'" -p "'+msg+'"',{timeout:10000,stdio:'ignore'});}catch{}
+  // Toast — must use exec() (not spawn detached) to inherit desktop session for WinRT toast
+  if(TOAST&&TOAST_PS1)cp.exec('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+TOAST_PS1+'" -Title "'+title.replace(/"/g,'')+'" -Message "'+tm.replace(/"/g,'')+'"',{timeout:10000},()=>{});
+  // FUTURE_HAPPY: if(HAPPY&&HP)try{cp.execSync('"'+HP+'" notify -t "'+title.replace(/"/g,'')+'" -p "'+msg+'"',{timeout:10000,stdio:'ignore'});}catch{}
   // GChat
   if(GCHAT){
     const iu={stop:'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2705.png',pre_tool_use:'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2753.png',notification:'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f514.png',permission_request:'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f512.png'};
@@ -608,9 +634,11 @@ setTimeout(()=>process.exit(0),15000);
         .replace("__ASK_SOUND__", &ask_s)
         .replace("__TOAST__", if toast { "true" } else { "false" })
         .replace("__TOAST_PS1__", &toast_ps1)
-        .replace("__HAPPY__", if happy { "true" } else { "false" })
-        .replace("__HAPPY_PATH__", &happy_path)
         .replace("__GCHAT__", &wh);
+
+    // FUTURE_HAPPY: also call:
+    //   .replace("__HAPPY__", if happy { "true" } else { "false" })
+    //   .replace("__HAPPY_PATH__", &happy_path)
 
     let wrapper_path = script_dir.join("claude-notify-hook.cjs");
     let _ = fs::write(&wrapper_path, content);
@@ -628,28 +656,24 @@ fn build_cn_hook_cmd(event_type: &str, toast_msg: &str) -> Vec<Value> {
     vec![serde_json::json!({ "type": "command", "command": cmd })]
 }
 
-fn build_stop_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
-    let _ = (sound, webhook, toast, happy); // config is in the script
+fn build_stop_entry() -> Value {
     let hooks = build_cn_hook_cmd("stop", "Claude Code finished a task");
-    serde_json::json!({ "hooks": hooks })
+    serde_json::json!({ "matcher": "", "hooks": hooks })
 }
 
-fn build_pre_tool_use_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
-    let _ = (sound, webhook, toast, happy);
+fn build_pre_tool_use_entry() -> Value {
     let hooks = build_cn_hook_cmd("pre_tool_use", "Claude Code is asking a question");
     serde_json::json!({ "matcher": "AskUserQuestion", "hooks": hooks })
 }
 
-fn build_notification_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
-    let _ = (sound, webhook, toast, happy);
+fn build_notification_entry() -> Value {
     let hooks = build_cn_hook_cmd("notification", "Claude Code needs attention");
-    serde_json::json!({ "hooks": hooks })
+    serde_json::json!({ "matcher": "", "hooks": hooks })
 }
 
-fn build_permission_request_entry(sound: &str, webhook: &str, toast: bool, happy: bool) -> Value {
-    let _ = (sound, webhook, toast, happy);
+fn build_permission_request_entry() -> Value {
     let hooks = build_cn_hook_cmd("permission_request", "Claude Code needs permission");
-    serde_json::json!({ "hooks": hooks })
+    serde_json::json!({ "matcher": "", "hooks": hooks })
 }
 
 // ── Tauri command handlers ────────────────────────────────────
@@ -667,6 +691,7 @@ fn get_config() -> Config {
             gchat_webhook: saved.gchat_webhook,
             auto_start: get_auto_start_enabled(),
             toast_enabled: saved.toast_enabled,
+            #[cfg(feature = "future_happy")]
             happy_enabled: saved.happy_enabled,
         };
     }
@@ -681,6 +706,7 @@ fn get_config() -> Config {
         gchat_webhook: extract_gchat_from_hooks(&s).unwrap_or_default(),
         auto_start: get_auto_start_enabled(),
         toast_enabled: detect_cmd_in_hooks(&s, |cmd| cmd.contains("ToastNotificationManager")),
+        #[cfg(feature = "future_happy")]
         happy_enabled: detect_cmd_in_hooks(&s, |cmd| {
             (cmd.contains("happy") && cmd.contains("notify"))
             || cmd.contains("claude-notify-happy.cjs")
@@ -711,13 +737,19 @@ fn save_config(args: SaveConfigArgs) -> Value {
             &args.ask_sound_path,
             &args.gchat_webhook,
             args.toast_enabled,
+            #[cfg(feature = "future_happy")]
             args.happy_enabled,
         );
 
-        let stop_entry = build_stop_entry(&args.sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
-        let pre_entry = build_pre_tool_use_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
-        let notif_entry = build_notification_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
-        let permission_entry = build_permission_request_entry(&args.ask_sound_path, &args.gchat_webhook, args.toast_enabled, args.happy_enabled);
+        #[cfg(feature = "future_happy")]
+        if args.happy_enabled {
+            generate_happy_wrapper();
+        }
+
+        let stop_entry = build_stop_entry();
+        let pre_entry = build_pre_tool_use_entry();
+        let notif_entry = build_notification_entry();
+        let permission_entry = build_permission_request_entry();
 
         if let Some(hooks) = s.get_mut("hooks").and_then(|h| h.as_object_mut()) {
             let existing_stop = hooks.get("Stop").cloned().unwrap_or(Value::Array(vec![]));
@@ -812,29 +844,6 @@ fn test_gchat(webhook: String) -> Value {
 }
 
 #[tauri::command]
-fn test_happy() -> Value {
-    let happy_path = get_happy_path();
-    if !happy_path.exists() {
-        return serde_json::json!({
-            "ok": false,
-            "error": "happy-coder not installed. Run: npm install -g happy-coder"
-        });
-    }
-    let output = Command::new(&happy_path)
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["notify", "-t", "Test", "-p", "Test from Claude Notify"])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => serde_json::json!({ "ok": true }),
-        Ok(o) => serde_json::json!({
-            "ok": false,
-            "error": String::from_utf8_lossy(&o.stderr).to_string()
-        }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    }
-}
-
-#[tauri::command]
 fn test_toast() -> Value {
     let ps_path = dirs::home_dir()
         .unwrap_or_default()
@@ -869,6 +878,7 @@ fn test_toast() -> Value {
 
 // ── Happy integration commands ────────────────────────────────
 
+#[cfg(feature = "future_happy")]
 fn find_npm() -> Option<PathBuf> {
     // 1. System Node.js install (most common)
     let system = PathBuf::from(r"C:\Program Files\nodejs\npm.cmd");
@@ -902,6 +912,7 @@ fn find_npm() -> Option<PathBuf> {
     None
 }
 
+#[cfg(feature = "future_happy")]
 fn find_node() -> Option<PathBuf> {
     let system = PathBuf::from(r"C:\Program Files\nodejs\node.exe");
     if system.exists() {
@@ -924,10 +935,12 @@ fn find_node() -> Option<PathBuf> {
     None
 }
 
+#[cfg(feature = "future_happy")]
 fn check_node_installed() -> bool {
     find_node().is_some()
 }
 
+#[cfg(feature = "future_happy")]
 #[derive(Serialize)]
 pub struct HappyStatus {
     node_installed: bool,
@@ -936,6 +949,7 @@ pub struct HappyStatus {
     status_text: String,
 }
 
+#[cfg(feature = "future_happy")]
 #[tauri::command]
 fn get_happy_status() -> HappyStatus {
     let node_ok = check_node_installed();
@@ -995,6 +1009,7 @@ fn get_happy_status() -> HappyStatus {
     }
 }
 
+#[cfg(feature = "future_happy")]
 #[tauri::command]
 fn install_happy() -> Value {
     if !check_node_installed() {
@@ -1042,6 +1057,7 @@ fn install_happy() -> Value {
     }
 }
 
+#[cfg(feature = "future_happy")]
 #[tauri::command]
 fn pair_happy() -> Value {
     let happy_path = get_happy_path();
@@ -1065,6 +1081,7 @@ fn pair_happy() -> Value {
     }
 }
 
+#[cfg(feature = "future_happy")]
 #[tauri::command]
 fn get_happy_project_dir() -> String {
     let s = read_settings();
@@ -1073,6 +1090,7 @@ fn get_happy_project_dir() -> String {
         .unwrap_or_default()
 }
 
+#[cfg(feature = "future_happy")]
 #[tauri::command]
 fn set_happy_project_dir(dir: String) {
     let mut s = read_settings();
@@ -1083,6 +1101,7 @@ fn set_happy_project_dir(dir: String) {
     }
 }
 
+#[cfg(feature = "future_happy")]
 #[tauri::command]
 fn launch_happy_session(cwd: String) -> Value {
     let happy_path = get_happy_path();
@@ -1126,6 +1145,7 @@ fn launch_happy_session(cwd: String) -> Value {
     }
 }
 
+#[cfg(feature = "future_happy")]
 #[tauri::command]
 fn check_happy_running() -> Value {
     let ps_cmd = r#"(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'happy' } | Measure-Object).Count"#;
@@ -1143,6 +1163,30 @@ fn check_happy_running() -> Value {
     };
 
     serde_json::json!({ "running": running })
+}
+
+#[cfg(feature = "future_happy")]
+#[tauri::command]
+fn test_happy() -> Value {
+    let happy_path = get_happy_path();
+    if !happy_path.exists() {
+        return serde_json::json!({
+            "ok": false,
+            "error": "happy-coder not installed. Run: npm install -g happy-coder"
+        });
+    }
+    let output = Command::new(&happy_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["notify", "-t", "Test", "-p", "Test from Claude Notify"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => serde_json::json!({ "ok": true }),
+        Ok(o) => serde_json::json!({
+            "ok": false,
+            "error": String::from_utf8_lossy(&o.stderr).to_string()
+        }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    }
 }
 
 // ── VSCode workspace detection ────────────────────────────────
@@ -1245,11 +1289,19 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            #[cfg(feature = "future_happy")]
             let launch_happy = MenuItemBuilder::with_id("launch_happy", "Launch Happy Session").build(app)?;
             let open_item = MenuItemBuilder::with_id("open", "Open Settings").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            #[cfg(feature = "future_happy")]
             let menu = MenuBuilder::new(app)
                 .item(&launch_happy)
+                .item(&open_item)
+                .separator()
+                .item(&quit_item)
+                .build()?;
+            #[cfg(not(feature = "future_happy"))]
+            let menu = MenuBuilder::new(app)
                 .item(&open_item)
                 .separator()
                 .item(&quit_item)
@@ -1260,6 +1312,7 @@ pub fn run() {
                 .tooltip("Claude Code Notifications")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
+                    #[cfg(feature = "future_happy")]
                     "launch_happy" => {
                         let happy_path = get_happy_path();
                         if happy_path.exists() {
@@ -1327,34 +1380,37 @@ pub fn run() {
             }
 
             // Background thread: monitor Happy session and update tray tooltip
-            let app_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(30));
-                    let ps_cmd = r#"(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'happy' } | Measure-Object).Count"#;
-                    let running = Command::new("powershell.exe")
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .args(["-c", ps_cmd])
-                        .output()
-                        .map(|o| {
-                            String::from_utf8_lossy(&o.stdout)
-                                .trim()
-                                .parse::<i32>()
-                                .unwrap_or(0) > 0
-                        })
-                        .unwrap_or(false);
+            #[cfg(feature = "future_happy")]
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        let ps_cmd = r#"(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'happy' } | Measure-Object).Count"#;
+                        let running = Command::new("powershell.exe")
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .args(["-c", ps_cmd])
+                            .output()
+                            .map(|o| {
+                                String::from_utf8_lossy(&o.stdout)
+                                    .trim()
+                                    .parse::<i32>()
+                                    .unwrap_or(0) > 0
+                            })
+                            .unwrap_or(false);
 
-                    let tooltip = if running {
-                        "Claude Notify — Happy session active"
-                    } else {
-                        "Claude Code Notifications"
-                    };
+                        let tooltip = if running {
+                            "Claude Notify — Happy session active"
+                        } else {
+                            "Claude Code Notifications"
+                        };
 
-                    if let Some(tray) = app_handle.tray_by_id("main-tray") {
-                        let _ = tray.set_tooltip(Some(tooltip));
+                        if let Some(tray) = app_handle.tray_by_id("main-tray") {
+                            let _ = tray.set_tooltip(Some(tooltip));
+                        }
                     }
-                }
-            });
+                });
+            }
 
             Ok(())
         })
@@ -1363,16 +1419,25 @@ pub fn run() {
             save_config,
             test_sound,
             test_gchat,
-            test_happy,
             test_toast,
-            get_happy_status,
-            install_happy,
-            pair_happy,
-            get_happy_project_dir,
-            set_happy_project_dir,
-            launch_happy_session,
-            check_happy_running,
             detect_vscode_workspaces,
+            // FUTURE_HAPPY commands registered below when feature is enabled:
+            #[cfg(feature = "future_happy")]
+            test_happy,
+            #[cfg(feature = "future_happy")]
+            get_happy_status,
+            #[cfg(feature = "future_happy")]
+            install_happy,
+            #[cfg(feature = "future_happy")]
+            pair_happy,
+            #[cfg(feature = "future_happy")]
+            get_happy_project_dir,
+            #[cfg(feature = "future_happy")]
+            set_happy_project_dir,
+            #[cfg(feature = "future_happy")]
+            launch_happy_session,
+            #[cfg(feature = "future_happy")]
+            check_happy_running,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

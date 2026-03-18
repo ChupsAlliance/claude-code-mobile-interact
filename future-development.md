@@ -1,10 +1,47 @@
-# Future Development Ideas
+# Future Development
 
-## VSCode Extension — Mobile Code Bridge
+Các ý tưởng phát triển tiếp theo cho Claude Code Mobile Interact.
 
-**Goal**: Build a custom VSCode extension that replaces the official Claude Code extension, with built-in mobile two-way interaction.
+---
 
-### Architecture
+## 1. Two-way Mobile Chat (ưu tiên cao)
+
+**Mục tiêu:** Gửi prompt từ điện thoại → Claude Code trên máy tính, không cần ngồi trước màn hình.
+
+### Kiến trúc dự kiến
+
+```
+Claude Code (hooks) → ntfy-server (port 2586)
+                           ↓ SSE stream
+                        Axum PWA server (port 2587)
+                           ↓ serves
+                        PWA (React) embedded via include_dir!
+                           ↓ QR code
+                        Phone browser (PWA)
+
+Phone gửi prompt → cc-commands ntfy topic → Tauri app → claude --print --resume <id>
+```
+
+### Yêu cầu
+- Custom ntfy server (Node.js) cho messaging
+- PWA mobile UI (React + Vite) hiển thị conversation
+- Tauri app listen topic, chạy `claude --print --resume`
+- QR code pairing (pair 1 lần)
+- Cloudflare Tunnel cho truy cập từ 4G
+
+### Estimated effort
+- ntfy server: 1 day
+- PWA mobile UI: 2-3 days
+- Tauri bridge integration: 1-2 days
+- Polish + testing: 1-2 days
+
+---
+
+## 2. VSCode Extension — Mobile Code Bridge (ý tưởng)
+
+**Mục tiêu:** Custom VSCode extension thay thế official Claude Code extension, với built-in mobile two-way interaction.
+
+### Kiến trúc
 ```
 User (VSCode) ──┐
                  ├── Our Extension ── claude CLI (stream-json) ── Claude API
@@ -13,32 +50,20 @@ User (Mobile) ──┘        │
                    (Happy relay or custom)
 ```
 
-### How it works
-1. Extension spawns `claude --print --input-format stream-json --output-format stream-json`
-2. Parses JSON stream → displays in VSCode webview (nice UI, Vietnamese, images)
-3. Simultaneously relays messages to mobile via relay
-4. Mobile sends message → relay → extension receives → feeds into claude stdin
-5. Claude response → shown on both VSCode webview and mobile
+### Cách hoạt động
+1. Extension spawn `claude --print --input-format stream-json --output-format stream-json`
+2. Parse JSON stream → hiển thị trong VSCode webview
+3. Relay messages tới mobile qua Happy hoặc custom relay
+4. Mobile gửi message → relay → extension → claude stdin
 
-### Why this works
-- We own the entire message pipeline → two-way sync is possible
-- Claude CLI handles all tool use, permissions, file editing — we just need UI + relay
-- Not dependent on Anthropic's extension
-- Supports Vietnamese, images, rich UI in webview
+### Ưu điểm
+- Sở hữu toàn bộ message pipeline → two-way sync
+- Hỗ trợ Vietnamese, images, rich UI trong webview
+- Không phụ thuộc Anthropic extension
 
-### Estimated effort
-- VSCode extension scaffold + webview UI: 1-2 days
-- Claude CLI stream-json integration: 1 day
-- Mobile relay (Happy relay or custom): 1-2 days
-- Polish: 1-2 days
+### Estimated effort: 4-8 ngày
 
-### Marketplace considerations
-- Use neutral name (e.g., "Mobile Code Bridge", "CodeSync Mobile") to avoid trademark issues
-- Mark as "unofficial/third-party"
-- Happy Coder precedent: third-party Claude Code tools exist on stores without issues
-
-### Why not integrate with existing Claude Code extension
-- VSCode extension uses stream-json SDK protocol internally
-- Happy needs PTY (terminal I/O) to sync — can't capture JSON stream
-- `claudeProcessWrapper` setting spawns .exe but protocol mismatch prevents sync
-- No API to inject messages into a running Claude Code extension session
+### Lý do không integrate với Claude Code extension hiện tại
+- VSCode extension dùng stream-json SDK protocol internally
+- Happy cần PTY (terminal I/O) → không capture được JSON stream
+- Không có API inject messages vào running session

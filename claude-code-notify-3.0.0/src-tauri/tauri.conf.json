@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/tauri-v2-schema/main/tauri.conf.json",
   "productName": "Claude Notify",
-  "version": "3.0.0",
+  "version": "3.0.2",
   "identifier": "com.claude.notify",
   "build": {
     "frontendDist": "../frontend",
@@ -14,7 +14,7 @@
       {
         "title": "Claude Code — Notifications",
         "width": 360,
-        "height": 840,
+        "height": 620,
         "resizable": true,
         "visible": false,
         "skipTaskbar": true,

@@ -1,6 +1,6 @@
 {
   "name": "claude-notify-app",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Tray app to configure Claude Code notifications",
   "scripts": {
     "start": "tauri dev",

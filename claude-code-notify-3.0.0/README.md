@@ -195,7 +195,10 @@ Gửi card notification vào Google Chat space.
 | `Stop` | Claude hoàn thành xử lý, trả quyền điều khiển |
 | `Notification` | Claude gửi thông báo giữa chừng |
 | `PreToolUse` (AskUserQuestion) | Claude cần người dùng nhập input |
+| `SessionEnd` | ~~Claude Code session kết thúc~~ (đã bỏ — không cần thiết) |
 | `PermissionRequest` | Claude cần quyền thực thi (file, command) |
+
+> **Note:** Hook format mới (Claude Code 2026+) yêu cầu `matcher` + `hooks[]` array, không phải flat `type`/`command`.
 
 ---
 
@@ -229,7 +232,7 @@ App không có background process. Khi Save Settings, app tạo **một file duy
 node "C:/Users/.../.claude/claude-notify-hook.cjs" "stop" "Claude Code finished a task"
 ```
 
-Script tự đọc stdin, phân tích event, và dispatch tới các kênh đã bật — tất cả chạy song song bằng `child_process.spawn()` với `detached: true`.
+Script tự đọc stdin, phân tích event, và dispatch tới các kênh đã bật — tất cả chạy song song. Toast dùng `child_process.exec()` (cần shell context để WinRT toast hiện), các kênh khác dùng `spawn()` detached.
 
 ### So với phiên bản cũ
 
@@ -240,6 +243,7 @@ Script tự đọc stdin, phân tích event, và dispatch tới các kênh đã 
 | PowerShell `$d` pipe bị strip khi Claude Code gọi → crash | Node.js `process.stdin` luôn nhận đúng dữ liệu |
 | Có `SessionEnd` hook | Bỏ `SessionEnd` (không cần thiết) |
 | Config nhúng trong command string | Config nhúng trong script file, dễ debug |
+| Toast dùng `spawn` detached → không hiện | Toast dùng `exec()` qua shell → hiện đúng |
 
 ### Dữ liệu lưu trong settings.json
 
@@ -268,7 +272,8 @@ Script tự đọc stdin, phân tích event, và dispatch tới các kênh đã 
 | File | Mục đích |
 |------|---------|
 | `~/.claude/claude-notify-hook.cjs` | Script tổng hợp — xử lý sound, toast, happy, gchat |
-| `~/.claude/claude-notify-toast.ps1` | PowerShell toast notification (được hook.cjs gọi) |
+| `~/.claude/claude-notify-toast.cjs` | Node.js wrapper gọi toast PS1 (dùng `exec()` thay vì `spawn` detached) |
+| `~/.claude/claude-notify-happy.cjs` | Node.js wrapper gọi Happy push |
 
 ### Hook fingerprinting
 

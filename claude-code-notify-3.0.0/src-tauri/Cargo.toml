@@ -1,6 +1,6 @@
 [package]
 name = "claude-notify-app"
-version = "3.0.0"
+version = "3.0.2"
 edition = "2021"
 
 [lib]
@@ -28,3 +28,6 @@ lto = true
 codegen-units = 1
 opt-level = "s"
 panic = "abort"
+
+[features]
+future_happy = []
